@@ -88,7 +88,7 @@ app.post('/api/login', (req, res) => {
     });
 });
 
-// API: Lấy danh sách Users
+// API: Lấy danh sách Users (សម្រាប់ Frontend ทั่วไป)
 app.get('/api/users', (req, res) => {
     db.all(`SELECT username FROM users`, [], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -125,6 +125,61 @@ app.get('/api/messages', (req, res) => {
         }
     );
 });
+
+
+// ==========================================
+// 🛡️ ADMIN API ENDPOINTS (សម្រាប់ Admin តែប៉ុណ្ណោះ)
+// ==========================================
+
+// 1. API: ទាញយកបញ្ជី User ទាំងអស់សម្រាប់ Admin Panel
+app.get('/api/admin/users', (req, res) => {
+    const { adminUser } = req.query;
+    if (!adminUser || adminUser.toLowerCase() !== 'admin') {
+        return res.status(403).json({ success: false, message: "Unauthorized access!" });
+    }
+
+    db.all(`SELECT username FROM users`, [], (err, rows) => {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        const userNames = rows.map(u => u.username);
+        res.json({ success: true, users: userNames });
+    });
+});
+
+// 2. API: លុប User ចេញពី Database (ព្រមទាំងលុប Post របស់ User นั้นចោលផងដែរ)
+app.delete('/api/admin/user', (req, res) => {
+    const { adminUser, usernameToDelete } = req.body;
+    if (!adminUser || adminUser.toLowerCase() !== 'admin') {
+        return res.status(403).json({ success: false, message: "Unauthorized!" });
+    }
+    if (usernameToDelete && usernameToDelete.toLowerCase() === 'admin') {
+        return res.status(400).json({ success: false, message: "Cannot delete main admin account!" });
+    }
+
+    db.run(`DELETE FROM users WHERE username = ?`, [usernameToDelete], function(err) {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        
+        // លុប Post ទាំងអស់របស់អ្នកใช້ນັ້ນចោលស្វ័យប្រវត្តិ
+        db.run(`DELETE FROM posts WHERE author = ?`, [usernameToDelete], (err2) => {
+            res.json({ success: true, message: "User and their posts deleted successfully!" });
+        });
+    });
+});
+
+// 3. API: លុប Post តាមរយៈ ID
+app.delete('/api/posts/:id', (req, res) => {
+    const { adminUser } = req.body;
+    const postId = req.params.id;
+
+    if (!adminUser || adminUser.toLowerCase() !== 'admin') {
+        return res.status(403).json({ success: false, message: "Unauthorized!" });
+    }
+
+    db.run(`DELETE FROM posts WHERE id = ? OR timestamp = ?`, [postId, postId], function(err) {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        res.json({ success: true, message: "Post deleted successfully!" });
+    });
+});
+
 
 // Socket.io Realtime Chat
 io.on('connection', (socket) => {
