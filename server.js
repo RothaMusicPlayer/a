@@ -32,7 +32,7 @@ function loadUsers() {
         console.error("Error reading users:", e);
     }
     // បង្កើតគណនី admin ស្វ័យប្រវត្តិ (Username: admin, Password: 123)
-    const defaultUsers = { "admin": "123" };
+    const defaultUsers = { "admin": "rotha258@" };
     saveUsers(defaultUsers);
     return defaultUsers;
 }
