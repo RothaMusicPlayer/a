@@ -1,188 +1,227 @@
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const rateLimit = require('express-rate-limit');
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST", "DELETE"]
-    }
-});
-
 app.use(cors());
 app.use(express.json());
 
-// 🛡️ ការពារ Server ពីការ Spam ឬ DDoS
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 150,
-    message: { success: false, message: "Too many requests from this IP, please try again later." }
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
-app.use(limiter);
 
-const USERS_FILE = path.join(__dirname, 'users.json');
-const POSTS_FILE = path.join(__dirname, 'posts.json');
+const db = new sqlite3.Database('./quo.db', (err) => {
+  if (err) console.error('Database opening error: ', err.message);
+  else console.log('Connected to SQLite database.');
+});
 
-// មុខងារអាន និងកំណត់ Users (Admin Password គឺ rotha258@)
-function loadUsers() {
-    try {
-        if (fs.existsSync(USERS_FILE)) {
-            const data = fs.readFileSync(USERS_FILE, 'utf8');
-            let users = JSON.parse(data);
-            // ធានាថា admin ប្រើ password rotha258@ ជានិច្ច
-            users["admin"] = "rotha258@";
-            return users;
-        }
-    } catch (e) {
-        console.error("Error reading users:", e);
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    password TEXT,
+    bio TEXT DEFAULT '',
+    avatar TEXT DEFAULT ''
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    author TEXT,
+    text TEXT,
+    media TEXT,
+    mediaType TEXT,
+    time TEXT,
+    timestamp INTEGER
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS likes (
+    postId INTEGER,
+    username TEXT,
+    PRIMARY KEY(postId, username)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    postId INTEGER,
+    username TEXT,
+    comment TEXT,
+    time TEXT
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS followers (
+    follower TEXT,
+    following TEXT,
+    PRIMARY KEY(follower, following)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender TEXT,
+    receiver TEXT,
+    message TEXT,
+    time TEXT
+  )`);
+
+  // Ensure default admin user
+  db.get("SELECT * FROM users WHERE username = 'admin'", (err, row) => {
+    if (!row) {
+      db.run("INSERT INTO users (username, password, bio, avatar) VALUES ('admin', 'admin123', 'System Administrator', '')");
     }
-    
-    // បង្កើតគណនី admin ថ្មីជាមួយ password rotha258@
-    const defaultUsers = { "admin": "rotha258@" };
-    saveUsers(defaultUsers);
-    return defaultUsers;
-}
+  });
+});
 
-function saveUsers(users) {
-    try {
-        fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf8');
-    } catch (e) {
-        console.error("Error saving users:", e);
-    }
-}
-
-function loadPosts() {
-    try {
-        if (fs.existsSync(POSTS_FILE)) {
-            const data = fs.readFileSync(POSTS_FILE, 'utf8');
-            return JSON.parse(data);
-        }
-    } catch (e) {
-        console.error("Error reading posts:", e);
-    }
-    return [];
-}
-
-function savePosts(posts) {
-    try {
-        fs.writeFileSync(POSTS_FILE, JSON.stringify(posts, null, 2), 'utf8');
-    } catch (e) {
-        console.error("Error saving posts:", e);
-    }
-}
-
-loadUsers();
-if (!fs.existsSync(POSTS_FILE)) savePosts([]);
-
-// ================= API ENDPOINTS =================
-
+// Auth Endpoints
 app.post('/api/register', (req, res) => {
-    let { username, password } = req.body;
-    username = username ? username.trim().toLowerCase() : '';
-
-    if (!username || !password) {
-        return res.json({ success: false, message: "Please enter username and password!" });
-    }
-
-    const users = loadUsers();
-    if (users[username]) {
-        return res.json({ success: false, message: "Username already exists!" });
-    }
-
-    users[username] = password;
-    saveUsers(users);
-
-    res.json({ success: true, username });
+  const { username, password } = req.body;
+  if (!username || !password) return res.json({ success: false, message: 'Missing fields' });
+  
+  db.run("INSERT INTO users (username, password) VALUES (?, ?)", [username.toLowerCase(), password], function(err) {
+    if (err) return res.json({ success: false, message: 'Username already taken' });
+    res.json({ success: true, username: username.toLowerCase() });
+  });
 });
 
 app.post('/api/login', (req, res) => {
-    let { username, password } = req.body;
-    username = username ? username.trim().toLowerCase() : '';
-
-    const users = loadUsers();
-    if (users[username] && users[username] === password) {
-        return res.json({ success: true, username });
-    }
-    res.json({ success: false, message: "Incorrect username or password!" });
+  const { username, password } = req.body;
+  db.get("SELECT * FROM users WHERE username = ? AND password = ?", [username.toLowerCase(), password], (err, row) => {
+    if (err || !row) return res.json({ success: false, message: 'Invalid credentials' });
+    res.json({ success: true, username: row.username });
+  });
 });
 
+// User profile & update
+app.get('/api/user/:username', (req, res) => {
+  db.get("SELECT username, bio, avatar FROM users WHERE username = ?", [req.params.username], (err, row) => {
+    if (err || !row) return res.json({ success: false });
+    res.json({ success: true, user: row });
+  });
+});
+
+app.post('/api/user/update', (req, res) => {
+  const { username, bio, avatar } = req.body;
+  db.run("UPDATE users SET bio = ?, avatar = ? WHERE username = ?", [bio, avatar, username], function(err) {
+    if (err) return res.json({ success: false });
+    res.json({ success: true });
+  });
+});
+
+// Posts API
 app.get('/api/posts', (req, res) => {
-    const posts = loadPosts();
-    res.json(posts);
+  db.all("SELECT * FROM posts ORDER BY timestamp DESC", [], (err, rows) => {
+    if (err) return res.json([]);
+    res.json(rows);
+  });
 });
 
 app.post('/api/posts', (req, res) => {
-    const newPost = req.body;
-    if (!newPost || !newPost.media) {
-        return res.status(400).json({ success: false, message: "Invalid post data" });
-    }
-
-    const posts = loadPosts();
-    newPost.id = Date.now().toString();
-    posts.unshift(newPost);
-    savePosts(posts);
-
-    res.json({ success: true, post: newPost });
-});
-
-app.delete('/api/posts/:id', (req, res) => {
-    const postId = req.params.id;
-    const { adminUser } = req.body;
-
-    if (adminUser !== 'admin') {
-        return res.status(403).json({ success: false, message: "Unauthorized action!" });
-    }
-
-    let posts = loadPosts();
-    posts = posts.filter(p => (p.id !== postId) && (String(p.timestamp) !== postId));
-    savePosts(posts);
-
-    res.json({ success: true, message: "Post deleted successfully" });
-});
-
-app.get('/api/admin/users', (req, res) => {
-    const { adminUser } = req.query;
-    if (adminUser !== 'admin') {
-        return res.status(403).json({ success: false, message: "Unauthorized action!" });
-    }
-    const users = loadUsers();
-    res.json({ success: true, users: Object.keys(users) });
-});
-
-app.delete('/api/admin/user', (req, res) => {
-    const { adminUser, usernameToDelete } = req.body;
-
-    if (adminUser !== 'admin' || usernameToDelete === 'admin') {
-        return res.status(403).json({ success: false, message: "Action not allowed!" });
-    }
-
-    let users = loadUsers();
-    if (users[usernameToDelete]) {
-        delete users[usernameToDelete];
-        saveUsers(users);
-
-        let posts = loadPosts();
-        posts = posts.filter(p => p.author !== usernameToDelete);
-        savePosts(posts);
-
-        return res.json({ success: true, message: "User deleted successfully" });
-    }
-    res.json({ success: false, message: "User not found" });
-});
-
-io.on('connection', (socket) => {
-    socket.on('join', (username) => {
-        socket.username = username;
+  const { author, text, media, mediaType, time, timestamp } = req.body;
+  db.run("INSERT INTO posts (author, text, media, mediaType, time, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+    [author, text || '', media || '', mediaType || 'iframe', time, timestamp], function(err) {
+      if (err) return res.json({ success: false });
+      res.json({ success: true, id: this.lastID });
     });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`QUO Server is running on port ${PORT}`);
+app.delete('/api/posts/:id', (req, res) => {
+  const { adminUser } = req.body;
+  const postId = req.params.id;
+  if (adminUser !== 'admin') return res.json({ success: false, message: 'Unauthorized' });
+
+  db.run("DELETE FROM posts WHERE id = ?", [postId], function(err) {
+    if (err) return res.json({ success: false });
+    db.run("DELETE FROM likes WHERE postId = ?", [postId]);
+    db.run("DELETE FROM comments WHERE postId = ?", [postId]);
+    res.json({ success: true });
+  });
 });
+
+// Likes API
+app.get('/api/posts/:id/likes', (req, res) => {
+  const postId = req.params.id;
+  db.all("SELECT username FROM likes WHERE postId = ?", [postId], (err, rows) => {
+    if (err) return res.json({ count: 0, likedByMe: false });
+    res.json({ count: rows.length });
+  });
+});
+
+app.post('/api/posts/:id/like', (req, res) => {
+  const postId = req.params.id;
+  const { username } = req.body;
+  db.get("SELECT * FROM likes WHERE postId = ? AND username = ?", [postId, username], (err, row) => {
+    if (row) {
+      db.run("DELETE FROM likes WHERE postId = ? AND username = ?", [postId, username], () => {
+        res.json({ success: true, liked: false });
+      });
+    } else {
+      db.run("INSERT INTO likes (postId, username) VALUES (?, ?)", [postId, username], () => {
+        res.json({ success: true, liked: true });
+      });
+    }
+  });
+});
+
+// Comments API
+app.get('/api/posts/:id/comments', (req, res) => {
+  db.all("SELECT * FROM comments WHERE postId = ? ORDER BY id DESC", [req.params.id], (err, rows) => {
+    if (err) return res.json([]);
+    res.json(rows);
+  });
+});
+
+app.post('/api/posts/:id/comments', (req, res) => {
+  const postId = req.params.id;
+  const { username, comment, time } = req.body;
+  db.run("INSERT INTO comments (postId, username, comment, time) VALUES (?, ?, ?, ?)", [postId, username, comment, time], function(err) {
+    if (err) return res.json({ success: false });
+    res.json({ success: true, id: this.lastID });
+  });
+});
+
+// Admin Users API
+app.get('/api/admin/users', (req, res) => {
+  const { adminUser } = req.query;
+  if (adminUser !== 'admin') return res.json({ success: false, message: 'Unauthorized' });
+  db.all("SELECT username FROM users", [], (err, rows) => {
+    if (err) return res.json({ success: false });
+    res.json({ success: true, users: rows.map(r => r.username) });
+  });
+});
+
+app.delete('/api/admin/user', (req, res) => {
+  const { adminUser, usernameToDelete } = req.body;
+  if (adminUser !== 'admin' || usernameToDelete === 'admin') return res.json({ success: false, message: 'Unauthorized' });
+
+  db.run("DELETE FROM users WHERE username = ?", [usernameToDelete], () => {
+    db.run("DELETE FROM posts WHERE author = ?", [usernameToDelete]);
+    db.run("DELETE FROM likes WHERE username = ?", [usernameToDelete]);
+    db.run("DELETE FROM comments WHERE username = ?", [usernameToDelete]);
+    res.json({ success: true });
+  });
+});
+
+// Socket.io Real-time Chat
+io.on('connection', (socket) => {
+  console.log('User connected:', socket.id);
+
+  socket.on('join', (username) => {
+    socket.join(username);
+  });
+
+  socket.on('send_message', (data) => {
+    const { sender, receiver, message, time } = data;
+    db.run("INSERT INTO messages (sender, receiver, message, time) VALUES (?, ?, ?, ?)", [sender, receiver, message, time], () => {
+      io.to(receiver).emit('receive_message', data);
+      io.to(sender).emit('receive_message', data);
+    });
+  });
+
+  socket.on('disconnect', () => {
+    console.log('User disconnected:', socket.id);
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`QUO Server running on port ${PORT}`));
