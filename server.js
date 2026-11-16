@@ -1,4 +1,3 @@
-
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -11,7 +10,7 @@ app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: { origin: "*", methods: ["GET", "POST", "DELETE"] }
 });
 
 const db = new sqlite3.Database('./quo.db', (err) => {
@@ -71,6 +70,11 @@ db.serialize(() => {
       db.run("INSERT INTO users (username, password, bio, avatar) VALUES ('admin', 'admin123', 'System Administrator', '')");
     }
   });
+});
+
+// Root health check
+app.get('/', (req, res) => {
+  res.send('QUO Server is running!');
 });
 
 // Auth Endpoints
@@ -142,8 +146,8 @@ app.delete('/api/posts/:id', (req, res) => {
 app.get('/api/posts/:id/likes', (req, res) => {
   const postId = req.params.id;
   db.all("SELECT username FROM likes WHERE postId = ?", [postId], (err, rows) => {
-    if (err) return res.json({ count: 0, likedByMe: false });
-    res.json({ count: rows.length });
+    if (err) return res.json({ count: 0 });
+    res.json({ count: rows.length, users: rows.map(r => r.username) });
   });
 });
 
@@ -180,6 +184,19 @@ app.post('/api/posts/:id/comments', (req, res) => {
   });
 });
 
+// Chat History API
+app.get('/api/messages/:user1/:user2', (req, res) => {
+  const { user1, user2 } = req.params;
+  db.all(
+    "SELECT * FROM messages WHERE (sender = ? AND receiver = ?) OR (sender = ? AND receiver = ?) ORDER BY id ASC",
+    [user1, user2, user2, user1],
+    (err, rows) => {
+      if (err) return res.json([]);
+      res.json(rows);
+    }
+  );
+});
+
 // Admin Users API
 app.get('/api/admin/users', (req, res) => {
   const { adminUser } = req.query;
@@ -204,8 +221,6 @@ app.delete('/api/admin/user', (req, res) => {
 
 // Socket.io Real-time Chat
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
-
   socket.on('join', (username) => {
     socket.join(username);
   });
@@ -216,10 +231,6 @@ io.on('connection', (socket) => {
       io.to(receiver).emit('receive_message', data);
       io.to(sender).emit('receive_message', data);
     });
-  });
-
-  socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
   });
 });
 
